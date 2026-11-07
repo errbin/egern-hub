@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 PUBLIC = {
     "converter": "https://github.com/errbin/egern-converter.git",
@@ -77,6 +77,7 @@ def private_markers(address):
     if host:
         markers.add(host+"/"+path)
         if path.endswith(".git"):markers.add(host+"/"+path[:-4])
+    markers.update(quote(marker,safe="") for marker in tuple(markers))
     return sorted(marker for marker in markers if marker)
 
 def prepare():

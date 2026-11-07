@@ -32,7 +32,7 @@ jobs:
           UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
           UPSTREAM_READ_KEY: ${{ secrets.UPSTREAM_READ_KEY }}
         run: python3 "$RUNNER_TEMP/community/run_build.py" prepare
-      - name: Install locked Python and JavaScript dependencies
+      - name: Install Python and JavaScript dependencies
         run: |
           set +x
           python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/egernlab-job/runtime/requirements.txt"
