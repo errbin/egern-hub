@@ -1,0 +1,64 @@
+name: Build and publish site
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '30 0 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: production-site
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch this public workflow by Git
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set +x
+          mkdir -p "$RUNNER_TEMP/community"
+          git init --quiet "$RUNNER_TEMP/community"
+          git -C "$RUNNER_TEMP/community" fetch --quiet --depth=1 "https://github.com/$REPOSITORY.git" "$REVISION" 2>/dev/null
+          git -C "$RUNNER_TEMP/community" checkout --quiet --detach FETCH_HEAD
+      - name: Fetch private build inputs by Git
+        env:
+          BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
+          BUILD_READ_KEY: ${{ secrets.BUILD_READ_KEY }}
+          UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
+          UPSTREAM_READ_KEY: ${{ secrets.UPSTREAM_READ_KEY }}
+        run: python3 "$RUNNER_TEMP/community/run_build.py" prepare
+      - name: Install locked Python and JavaScript dependencies
+        run: |
+          set +x
+          python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/egernlab-job/runtime/requirements.txt"
+          cd "$RUNNER_TEMP/egernlab-job/runtime/tools/js-readability"
+          npm ci --ignore-scripts --no-audit --no-fund --silent
+          release="$(curl --fail --silent --show-error https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | awk '/linux-x64.tar.xz$/ {print $2; exit}')"
+          test -n "$release"
+          base="${release%.tar.xz}"
+          curl --fail --silent --show-error "https://nodejs.org/dist/latest-v22.x/$release" --output "$RUNNER_TEMP/node22.tar.xz"
+          curl --fail --silent --show-error https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep "  $release$" > "$RUNNER_TEMP/node22.sha256"
+          (cd "$RUNNER_TEMP" && sha256sum --check --status node22.sha256)
+          mkdir -p "$RUNNER_TEMP/node22"
+          tar -xJf "$RUNNER_TEMP/node22.tar.xz" -C "$RUNNER_TEMP/node22" --strip-components=1 "$base"
+          echo "$RUNNER_TEMP/node22/bin" >> "$GITHUB_PATH"
+      - name: Check the converter's fixed module architecture
+        run: python3 -m unittest tests.test_analysis_architecture -v
+        working-directory: ${{ runner.temp }}/egernlab-job/runtime
+      - name: Run tests and build with differential verification
+        run: python3 "$RUNNER_TEMP/community/run_build.py" build
+      - name: Store the upstream snapshot with Git
+        env:
+          UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
+          UPSTREAM_WRITE_KEY: ${{ secrets.UPSTREAM_WRITE_KEY }}
+        run: python3 "$RUNNER_TEMP/community/run_build.py" persist-upstream
+      - name: Publish to the configured private site repository with Git
+        env:
+          SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
+          SITE_WRITE_KEY: ${{ secrets.SITE_WRITE_KEY }}
+        run: python3 "$RUNNER_TEMP/community/run_build.py" publish
