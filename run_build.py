@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import quote, urlsplit
 
 PUBLIC = {
@@ -47,6 +48,20 @@ def output(name, value):
     path=os.environ.get("GITHUB_OUTPUT")
     if path:
         with open(path,"a",encoding="utf-8") as f:f.write(f"{name}={value}\n")
+
+def run_with_heartbeat(args, *, cwd, env, log_path, stage, interval=60):
+    started=time.monotonic()
+    print(f"{stage} started; detailed output is withheld from the Actions log.",flush=True)
+    with Path(log_path).open("wb") as log:
+        process=subprocess.Popen(args,cwd=cwd,env=env,stdout=log,stderr=subprocess.STDOUT)
+        while True:
+            try:
+                returncode=process.wait(timeout=interval)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed=int(time.monotonic()-started)
+                print(f"{stage} is still running; elapsed {elapsed // 60}m {elapsed % 60}s.",flush=True)
+    return returncode
 
 def verify_api_free(*roots):
     forbidden=("api"+"."+"github"+"."+"com","github"+".com/api/v3","github"+".com/api/graphql","github"+"_json","github"+"_token","gh_"+"token","gh"+" api","octo"+"kit","py"+"github","gh"+"api")
@@ -112,13 +127,11 @@ def build():
     root=job_root();runtime=root/"runtime";dist=root/"site-output";raw=root/"captured-upstream"
     if not runtime.is_dir():raise ValueError("Build input is missing")
     env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",EGERN_RAW_ROOT=str(raw))
-    result=subprocess.run([sys.executable,"build.py","--verify","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,capture_output=True)
-    (root/"build.log").write_bytes(result.stdout+b"\n"+result.stderr)
-    if result.returncode:
+    result=run_with_heartbeat([sys.executable,"build.py","--verify","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,log_path=root/"build.log",stage="Build and differential verification")
+    if result:
         raise RuntimeError("Source synchronization, tests, conversion or differential validation failed; previous website remains intact")
-    tests=subprocess.run([sys.executable,"-m","unittest","discover","-s","tests","-v"],cwd=runtime,env=env,capture_output=True)
-    (root/"tests.log").write_bytes(tests.stdout+b"\n"+tests.stderr)
-    if tests.returncode:raise RuntimeError("Full converter and build regression suite failed; details remain in the private runner workspace")
+    tests=run_with_heartbeat([sys.executable,"-m","unittest","discover","-s","tests","-v"],cwd=runtime,env=env,log_path=root/"tests.log",stage="Full regression tests")
+    if tests:raise RuntimeError("Full converter and build regression suite failed; details remain in the temporary runner workspace")
     print("Source synchronization, conversion, differential verification and full regression suite passed.")
 
 def persist_upstream():
