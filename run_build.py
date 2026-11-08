@@ -116,12 +116,21 @@ class LogSanitizer:
         self.credentials=sorted(credentials,key=len,reverse=True)
         self.in_private_key=False
 
+    def redact(self, text):
+        for value in self.credentials:
+            text=text.replace(value,"[REDACTED CREDENTIAL]")
+        for value in self.repositories:
+            text=re.sub(re.escape(value),"[PRIVATE REPOSITORY]",text,flags=re.I)
+        text=re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)","[REDACTED CREDENTIAL]",text)
+        return re.sub(r"(https?://)[^/\s@]+@",r"\1[REDACTED CREDENTIAL]@",text)
+
     def clean(self, text):
-        # Decode common encodings before matching, including URL-encoded Git remotes.
-        for _ in range(2):
-            decoded=unquote(text)
-            if decoded==text:break
-            text=decoded
+        def encoded(match):
+            original=match.group()
+            decoded=unquote(unquote(original))
+            masked=self.redact(decoded)
+            # Preserve ordinary URLs exactly; decode only to identify secrets.
+            return original if masked==decoded else masked
         text=re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","",text)
         lines=[]
         for line in text.splitlines():
@@ -130,12 +139,7 @@ class LogSanitizer:
                 if re.search(r"-----END .*PRIVATE KEY-----",line):self.in_private_key=False
                 lines.append("[REDACTED PRIVATE KEY]")
                 continue
-            for value in self.credentials:
-                line=line.replace(value,"[REDACTED CREDENTIAL]")
-            for value in self.repositories:
-                line=re.sub(re.escape(value),"[PRIVATE REPOSITORY]",line,flags=re.I)
-            line=re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)","[REDACTED CREDENTIAL]",line)
-            line=re.sub(r"(https?://)[^/\s@]+@",r"\1[REDACTED CREDENTIAL]@",line)
+            line=self.redact(re.sub(r"\S*%[0-9a-fA-F]{2}\S*",encoded,line))
             # Upstream text must not be interpreted as Actions workflow commands.
             lines.append(line.replace("::",":\u200b:"))
         return "\n".join(lines)
@@ -169,6 +173,11 @@ def public_progress(line):
     index,total=count("index"),count("total")
     position=f" ({index}/{total})" if index is not None and total is not None else ""
     if kind=="source":
+        if stage in {"reading_repository_file","read_repository_file"}:
+            method={"cache":"local cache","archive":"repository snapshot","download":"network download"}.get(event.get("method"))
+            verb="Reading" if stage=="reading_repository_file" else "Read"
+            suffix=f" ({method})" if method else ""
+            return f"{verb} source file{suffix}: {label}"
         messages={
             "checking":f"Checking source: {label}",
             "fetching":f"Fetching source: {label}",
@@ -177,8 +186,6 @@ def public_progress(line):
             "checking_history":f"Checking source history: {label}",
             "history_checking":f"Checking source history file: {label}",
             "history_checked":f"Checked source history file: {label}",
-            "reading_repository_file":f"Reading source file: {label}",
-            "read_repository_file":f"Read source file: {label}",
         }
         if stage in {"telegram_fetching_page","telegram_page_fetched"}:
             page=count("page")

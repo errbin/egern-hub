@@ -29,9 +29,11 @@ class BuildLogTests(unittest.TestCase):
         text='\n'.join([
             'git@github.com:demo/private-engine.git: Permission denied (publickey)',
             'https%3A%2F%2Fgithub.com%2Fdemo%2Fprivate-inputs.git HTTP 403',
+            'https://github.com/demo/private%2Dengine.git',
             '/tmp/private-output/build.py:42 ValueError: failed',
             'token=sensitive-example-value',
             'https://github.com/Example/public-scripts/blob/main/天气.js',
+            'https://raw.githubusercontent.com/Example/scripts/main/tool%20name.js?pattern=%5Efoo',
             'SyntaxError: Unexpected token at 广告过滤.js:12',
         ])
         output=clean(text)
@@ -39,6 +41,7 @@ class BuildLogTests(unittest.TestCase):
             self.assertNotIn(hidden,output)
         for visible in ['Permission denied (publickey)','HTTP 403','ValueError: failed',
                         'https://github.com/Example/public-scripts/blob/main/天气.js',
+                        'https://raw.githubusercontent.com/Example/scripts/main/tool%20name.js?pattern=%5Efoo',
                         'SyntaxError: Unexpected token at 广告过滤.js:12']:
             self.assertIn(visible,output)
 
@@ -91,6 +94,17 @@ sys.exit(7 if signal.exists() else 8)
         self.assertIn('ad-filter.js',message)
         self.assertIn('TypeError: missing body',message)
         self.assertIn('$.body',message)
+
+    def test_formats_source_reference_and_actual_read_method(self):
+        url='https://raw.githubusercontent.com/Example/scripts/'+'a'*40+'/folder/demo.js'
+        for method,label in [('cache','local cache'),('archive','repository snapshot'),('download','network download')]:
+            with self.subTest(method=method):
+                event={'kind':'source','stage':'reading_repository_file','id':'folder/demo.js',
+                       'url':url,'method':method}
+                message=runner.public_progress('@@EGERN_PROGRESS '+json.dumps(event))
+                self.assertIn(url,message)
+                self.assertIn(label,message)
+                self.assertIn('folder/demo.js',message)
 
     def test_failed_setup_command_prints_sanitized_error(self):
         result=subprocess.CompletedProcess(['git'],128,b'',
