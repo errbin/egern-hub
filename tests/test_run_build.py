@@ -140,12 +140,15 @@ sys.exit(7 if signal.exists() else 8)
                     'stage':'case_completed','id':status+'.js','result':{'status':status}}))
             diagnostics.write('@@EGERN_PROGRESS '+json.dumps({'kind':'script',
                 'stage':'conversion_failed','id':'demo.js','reason':'unsupported completion flow'}))
+            diagnostics.write('@@EGERN_PROGRESS '+json.dumps({'kind':'script',
+                'stage':'probe_generation_skipped','id':'slow.js','reason':'probe analysis timed out'}))
             for line in ['Traceback (most recent call last):',
                          '  File "/tmp/private-engine/build.py", line 42, in build',
                          '    parse_script()', 'ValueError: invalid rule', 'ordinary progress']:
                 diagnostics.write(line)
         text=output.getvalue()
         for visible in ['converted_error.js','mismatch.js','demo.js','unsupported completion flow',
+                        'Verification probes skipped: slow.js: probe analysis timed out',
                         'line 42','parse_script()','ValueError: invalid rule']:
             self.assertIn(visible,text)
         for hidden in ['passed.js','inconclusive.js','private-engine','ordinary progress']:

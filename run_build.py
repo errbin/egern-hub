@@ -92,7 +92,7 @@ class ErrorLogFilter:
             if not isinstance(event.get("stage"),str):return
             result=event.get("result")
             status=result.get("status") if isinstance(result,dict) else event.get("status")
-            if event.get("stage")!="conversion_failed" and (not isinstance(status,str) or status not in self.failures):return
+            if event.get("stage") not in {"conversion_failed","probe_generation_skipped"} and (not isinstance(status,str) or status not in self.failures):return
             message=public_progress(line)
             if message:self.emit(self.sanitizer.clean(message))
             return
@@ -226,6 +226,7 @@ def public_progress(line):
             "converted":f"Converted script: {label}{position}",
             "verification_probes":f"Preparing verification: {label}{position}",
             "probes_ready":f"Verification probes ready: {label}{position}",
+            "probe_generation_skipped":f"Verification probes skipped: {label}{position}: {event.get('reason','')}",
         }
         return messages.get(stage)
     if kind=="verification":
