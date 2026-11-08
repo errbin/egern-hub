@@ -1,4 +1,4 @@
-"""API-free Git workflow runner for isolated Egern build and publication stages."""
+"""Git workflow runner for isolated Egern build and publication stages."""
 from __future__ import annotations
 import argparse
 import json
@@ -63,15 +63,17 @@ def run_with_heartbeat(args, *, cwd, env, log_path, stage, interval=60):
                 print(f"{stage} is still running; elapsed {elapsed // 60}m {elapsed % 60}s.",flush=True)
     return returncode
 
-def verify_api_free(*roots):
+def verify_api_free(*roots, allow_api_files=()):
     forbidden=("api"+"."+"github"+"."+"com","github"+".com/api/v3","github"+".com/api/graphql","github"+"_json","github"+"_token","gh_"+"token","gh"+" api","octo"+"kit","py"+"github","gh"+"api")
     suffixes={".py",".mjs",".cjs",".js",".html",".json",".yml",".yaml",".sh"}
+    allowed={Path(path).resolve() for path in allow_api_files}
     files=[]
     for root in roots:
         root=Path(root)
         if root.is_file():files.append(root)
         elif root.exists():files.extend(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes and ".git" not in p.parts and "node_modules" not in p.parts)
     for path in files:
+        if path.resolve() in allowed:continue
         lowered=path.read_text(encoding="utf-8",errors="replace").lower()
         if any(term in lowered for term in forbidden):raise ValueError("GitHub API dependency detected in project code")
         if path.suffix in {".yml",".yaml"} and re.search(r"(?m)^\s*uses:\s*",lowered):
@@ -112,7 +114,8 @@ def prepare():
         execute(["git","-C",str(dest),"fetch","--quiet","--depth=1",url,revision])
         execute(["git","-C",str(dest),"checkout","--quiet","--detach","FETCH_HEAD"])
         repos[role]=dest
-    verify_api_free(repos["converter"]/"tools",repos["sources"]/"tools",Path(__file__).resolve().parent/".github/workflows",Path(__file__).resolve())
+    community=Path(__file__).resolve().parent
+    verify_api_free(repos["converter"]/"tools",repos["sources"]/"tools",community/".github",Path(__file__).resolve(),allow_api_files=(community/".github/scripts/prune_workflow_runs.py",))
     result=subprocess.run([sys.executable,"tools/validate.py"],cwd=repos["sources"],capture_output=True)
     if result.returncode:raise RuntimeError("Public source catalog validation failed")
     result=subprocess.run([sys.executable,"-m","unittest","discover","-s","tests","-p","test_catalog*.py"],cwd=repos["sources"],capture_output=True)

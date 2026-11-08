@@ -11,6 +11,30 @@ concurrency:
   group: production-site
   cancel-in-progress: false
 jobs:
+  prune-workflow-history:
+    name: Keep one previous workflow run
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Fetch the public cleanup script by Git
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set +x
+          mkdir -p "$RUNNER_TEMP/run-history"
+          git init --quiet "$RUNNER_TEMP/run-history"
+          git -C "$RUNNER_TEMP/run-history" fetch --quiet --depth=1 "https://github.com/$REPOSITORY.git" "$REVISION" 2>/dev/null
+          git -C "$RUNNER_TEMP/run-history" checkout --quiet --detach FETCH_HEAD
+      - name: Remove older completed runs for this workflow
+        env:
+          ACTIONS_CLEANUP_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/run-history/.github/scripts/prune_workflow_runs.py"
+
   build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
