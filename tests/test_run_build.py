@@ -78,8 +78,8 @@ while not signal.exists() and time.monotonic()<deadline:time.sleep(0.01)
 sys.exit(7 if signal.exists() else 8)
 '''
             with contextlib.redirect_stdout(output):
-                result=runner.run_with_heartbeat([sys.executable,'-u','-c',child,str(signal)],
-                    cwd=root,env=self.environment(),log_path=root/'build.log',stage='Test build')
+                result=runner.run_with_error_logs([sys.executable,'-u','-c',child,str(signal)],
+                    cwd=root,env=self.environment(),log_path=root/'build.log')
             self.assertEqual(result,7)
             self.assertIn('RuntimeError: 脚本.js:17 network failed',output.getvalue())
             self.assertIn('HTTP 403',output.getvalue())
@@ -114,6 +114,50 @@ sys.exit(7 if signal.exists() else 8)
             with contextlib.redirect_stdout(output),self.assertRaisesRegex(RuntimeError,'128'):
                 runner.execute(['git'])
         self.assertIn('Permission denied (publickey)',output.getvalue())
+        self.assertNotIn('private-engine',output.getvalue())
+
+    def test_successful_build_is_silent_but_private_log_is_complete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            lines=['Building: Generate static site',
+                   'test_failed_conversion (tests.Check) ... ok',
+                   '@@EGERN_PROGRESS '+json.dumps({'kind':'verification','stage':'case_completed',
+                       'id':'demo.js','result':{'status':'passed','original_error':None}})]
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result=runner.run_with_error_logs([sys.executable,'-c','print('+repr('\n'.join(lines))+')'],
+                    cwd=root,env=self.environment(),log_path=root/'build.log')
+            self.assertEqual(result,0)
+            self.assertEqual(output.getvalue(),'')
+            self.assertEqual((root/'build.log').read_text(),'\n'.join(lines)+'\n')
+
+    def test_only_failed_events_and_traceback_details_are_shown(self):
+        output=io.StringIO()
+        diagnostics=runner.ErrorLogFilter(runner.LogSanitizer(self.environment()))
+        with contextlib.redirect_stdout(output):
+            for status in ['passed','inconclusive','converted_error','mismatch']:
+                diagnostics.write('@@EGERN_PROGRESS '+json.dumps({'kind':'verification',
+                    'stage':'case_completed','id':status+'.js','result':{'status':status}}))
+            diagnostics.write('@@EGERN_PROGRESS '+json.dumps({'kind':'script',
+                'stage':'conversion_failed','id':'demo.js','reason':'unsupported completion flow'}))
+            for line in ['Traceback (most recent call last):',
+                         '  File "/tmp/private-engine/build.py", line 42, in build',
+                         '    parse_script()', 'ValueError: invalid rule', 'ordinary progress']:
+                diagnostics.write(line)
+        text=output.getvalue()
+        for visible in ['converted_error.js','mismatch.js','demo.js','unsupported completion flow',
+                        'line 42','parse_script()','ValueError: invalid rule']:
+            self.assertIn(visible,text)
+        for hidden in ['passed.js','inconclusive.js','private-engine','ordinary progress']:
+            self.assertNotIn(hidden,text)
+
+    def test_unclassified_command_failure_keeps_sanitized_diagnostics(self):
+        result=subprocess.CompletedProcess(['git'],128,b'',b'private-engine: malformed response\n')
+        output=io.StringIO()
+        with patch.dict(os.environ,self.environment()),patch.object(runner.subprocess,'run',return_value=result):
+            with contextlib.redirect_stdout(output),self.assertRaises(RuntimeError):
+                runner.execute(['git'])
+        self.assertIn('malformed response',output.getvalue())
         self.assertNotIn('private-engine',output.getvalue())
 
 

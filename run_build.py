@@ -1,17 +1,15 @@
 """Git workflow runner for isolated Egern build and publication stages."""
 from __future__ import annotations
 import argparse
+from collections import deque
 import json
 import os
 from pathlib import Path
-import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
-from threading import Thread
-import time
 from urllib.parse import quote, unquote, urlsplit
 
 PUBLIC = {
@@ -31,11 +29,13 @@ def execute(args, *, key=None, cwd=None, data=None):
         env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR"
     try:
         result = subprocess.run(args, cwd=cwd, env=env, input=data, capture_output=True)
-        sanitizer=LogSanitizer()
+        diagnostics=ErrorLogFilter(LogSanitizer())
         for stream in (result.stdout,result.stderr):
             if stream:
-                print(sanitizer.clean(stream.decode("utf-8","replace")),flush=True)
+                for line in stream.decode("utf-8","replace").splitlines():
+                    diagnostics.write(line)
         if result.returncode:
+            diagnostics.finish(result.returncode)
             raise RuntimeError(f"Command failed with exit code {result.returncode}; see diagnostics above")
         return result.stdout.decode("utf-8", "replace").strip()
     finally:
@@ -55,44 +55,63 @@ def output(name, value):
     if path:
         with open(path,"a",encoding="utf-8") as f:f.write(f"{name}={value}\n")
 
-def run_with_heartbeat(args, *, cwd, env, log_path, stage, interval=60, private_markers=()):
-    started=time.monotonic()
-    sanitizer=LogSanitizer(env,private_markers)
-    print(f"{stage} started; output is streamed with private repository details and credentials redacted.",flush=True)
+def run_with_error_logs(args, *, cwd, env, log_path, private_markers=()):
+    diagnostics=ErrorLogFilter(LogSanitizer(env,private_markers))
     with Path(log_path).open("wb") as log:
+        Path(log_path).chmod(0o600)
         process=subprocess.Popen(args,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=0)
-        lines=queue.Queue(maxsize=256)
-        def capture_output():
-            try:
-                for line in process.stdout:
-                    log.write(line)
-                    log.flush()
-                    lines.put(line)
-            finally:
-                lines.put(None)
-                process.stdout.close()
-        reader=Thread(target=capture_output,daemon=True)
-        reader.start()
-        last_progress=""
-        deadline=time.monotonic()+interval
-        while True:
-            try:
-                line=lines.get(timeout=max(0.05,deadline-time.monotonic()))
-                if line is None:
-                    break
-                decoded=line.decode("utf-8","replace").rstrip("\r\n")
-                message=public_progress(decoded) or decoded
-                message=sanitizer.clean(message)
-                if message:
-                    last_progress=message.splitlines()[-1]
-                    print(message,flush=True)
-            except queue.Empty:
-                elapsed=int(time.monotonic()-started)
-                suffix=f" Last progress: {last_progress}" if last_progress else ""
-                print(f"{stage} is still running; elapsed {elapsed // 60}m {elapsed % 60}s.{suffix}",flush=True)
-                deadline=time.monotonic()+interval
-        reader.join()
-        return process.wait()
+        with process.stdout:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                diagnostics.write(line.decode("utf-8","replace").rstrip("\r\n"))
+        result=process.wait()
+        diagnostics.finish(result)
+        return result
+
+
+class ErrorLogFilter:
+    """Stream errors and traceback context; retain a bounded failure fallback."""
+    marker=re.compile(r"\b(?:[\w.]*(?:Error|Exception)\b|Traceback\b|FAIL(?:ED)?\b|ERROR\b|FATAL\b)|\b(?:error|fatal|critical)\s*:|\bHTTP(?:\s+Error)?\s+[45]\d\d\b|\b(?:failed|failure|permission denied|connection refused|timed out)\b",re.I)
+    failures={"failed","mismatch","expectation_failed","original_error","converted_error"}
+
+    def __init__(self,sanitizer):
+        self.sanitizer=sanitizer
+        self.traceback=False
+        self.emitted=False
+        self.tail=deque(maxlen=20)
+
+    def write(self,line):
+        # Sanitize every line, including hidden key bodies, to preserve redaction state.
+        line=self.sanitizer.clean(line)
+        if line.startswith("@@EGERN_PROGRESS "):
+            self.traceback=False
+            try:event=json.loads(line[len("@@EGERN_PROGRESS "):])
+            except (TypeError,ValueError):return
+            if not isinstance(event,dict):return
+            if not isinstance(event.get("stage"),str):return
+            result=event.get("result")
+            status=result.get("status") if isinstance(result,dict) else event.get("status")
+            if event.get("stage")!="conversion_failed" and (not isinstance(status,str) or status not in self.failures):return
+            message=public_progress(line)
+            if message:self.emit(self.sanitizer.clean(message))
+            return
+        if line:self.tail.append(line)
+        if line.startswith("Building: "):return
+        if re.match(r"^test\S+.* \.\.\. (?:ok|skipped\b)",line):return
+        continuation=self.traceback and (not line.strip() or line[:1].isspace())
+        self.traceback=line.startswith("Traceback ") or continuation
+        if self.marker.search(line) or continuation:
+            self.emit(line)
+
+    def emit(self,line):
+        print(line,flush=True)
+        self.emitted=True
+
+    def finish(self,returncode):
+        if returncode and not self.emitted:
+            self.emit(f"Command failed with exit code {returncode}; last diagnostic lines:")
+            for line in self.tail:self.emit(line)
 
 
 class LogSanitizer:
@@ -278,19 +297,17 @@ def prepare():
     runtime=root/"runtime"
     execute([sys.executable,str(core/"assemble.py"),"--converter",str(repos["converter"]),"--sources",str(repos["sources"]),"--archive",str(upstream),"--output",str(runtime)])
     output("job_root",str(root))
-    print("Pinned source repositories and prepared isolated build input.")
 
 def build():
     root=job_root();runtime=root/"runtime";dist=root/"site-output";raw=root/"captured-upstream"
     if not runtime.is_dir():raise ValueError("Build input is missing")
     env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",PYTHONUNBUFFERED="1",EGERN_PROGRESS_EVENTS="1",EGERN_RAW_ROOT=str(raw))
     private=private_markers(os.environ.get("BUILD_REPOSITORY"))+private_markers(os.environ.get("UPSTREAM_REPOSITORY"))
-    result=run_with_heartbeat([sys.executable,"build.py","--verify","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,log_path=root/"build.log",stage="Build and differential verification",private_markers=private)
+    result=run_with_error_logs([sys.executable,"build.py","--verify","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,log_path=root/"build.log",private_markers=private)
     if result:
         raise RuntimeError("Source synchronization, tests, conversion or differential validation failed; previous website remains intact")
-    tests=run_with_heartbeat([sys.executable,"-m","unittest","discover","-s","tests","-v"],cwd=runtime,env=env,log_path=root/"tests.log",stage="Full regression tests",private_markers=private)
+    tests=run_with_error_logs([sys.executable,"-m","unittest","discover","-s","tests","-v"],cwd=runtime,env=env,log_path=root/"tests.log",private_markers=private)
     if tests:raise RuntimeError("Full converter and build regression suite failed; see diagnostics above")
-    print("Source synchronization, conversion, differential verification and full regression suite passed.")
 
 def persist_upstream():
     root=job_root();archive=root/"upstream";raw=root/"captured-upstream";runtime=root/"runtime"
@@ -308,7 +325,6 @@ def persist_upstream():
         src=runtime/"web/assets"/name
         if src.exists():shutil.copytree(src,archive/"state/artwork"/name,dirs_exist_ok=True)
     push_repository(archive,os.environ.get("UPSTREAM_REPOSITORY"),os.environ.get("UPSTREAM_WRITE_KEY"),"main")
-    print("Captured original source bytes and build state by Git.")
 
 def push_repository(directory, destination, key, branch):
     if not destination or not key:raise ValueError("Missing publication configuration")
@@ -345,7 +361,6 @@ def publish():
         shutil.rmtree(p) if p.is_dir() else p.unlink()
     shutil.copytree(sanitized,target,dirs_exist_ok=True)
     push_repository(target,address,key,"production")
-    print("Verified website published by Git.")
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument("stage",choices=["prepare","build","persist-upstream","publish"])
