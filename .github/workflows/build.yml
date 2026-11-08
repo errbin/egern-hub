@@ -49,6 +49,9 @@ jobs:
           git init --quiet "$RUNNER_TEMP/community"
           git -C "$RUNNER_TEMP/community" fetch --quiet --depth=1 "https://github.com/$REPOSITORY.git" "$REVISION" 2>/dev/null
           git -C "$RUNNER_TEMP/community" checkout --quiet --detach FETCH_HEAD
+      - name: Check live build logging and private repository redaction
+        run: python3 -m unittest discover -s tests -p 'test_run_build.py' -v
+        working-directory: ${{ runner.temp }}/community
       - name: Fetch private build inputs by Git
         env:
           BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
@@ -77,6 +80,10 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_analysis_architecture.py' -v
         working-directory: ${{ runner.temp }}/egernlab-job/runtime
       - name: Run tests and build with differential verification
+        env:
+          BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
+          UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
+          SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
         run: python3 "$RUNNER_TEMP/community/run_build.py" build
       - name: Store the upstream snapshot with Git
         env:
