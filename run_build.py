@@ -280,16 +280,17 @@ def prepare():
     core=root/"build-engine";sources=root/"sources";upstream=root/"upstream"
     clone(os.environ.get("BUILD_REPOSITORY"),core,os.environ.get("BUILD_READ_KEY"))
     verify_api_free(core/"build.py",core/"tools",core/"web")
-    lock=json.loads((core/"toolchain.lock.json").read_text(encoding="utf-8"))
-    repos={}
+    repos={};resolved={}
     for role,url in PUBLIC.items():
-        revision=lock[role]
-        if not re.fullmatch(r"[0-9a-f]{40}",revision):raise ValueError("Public toolchain revisions must be pinned commit IDs")
         dest=root/role
         execute(["git","init","--quiet",str(dest)])
-        execute(["git","-C",str(dest),"fetch","--quiet","--depth=1",url,revision])
+        execute(["git","-C",str(dest),"fetch","--quiet","--depth=1",url,"HEAD"])
         execute(["git","-C",str(dest),"checkout","--quiet","--detach","FETCH_HEAD"])
-        repos[role]=dest
+        revision=execute(["git","-C",str(dest),"rev-parse","HEAD"])
+        if not re.fullmatch(r"[0-9a-f]{40}",revision):raise ValueError("Public toolchain checkout did not resolve to a commit ID")
+        repos[role]=dest;resolved[role]=revision
+    (root/"toolchain.json").write_text(json.dumps(resolved,indent=2,sort_keys=True)+"\n",encoding="utf-8")
+    output("toolchain",json.dumps(resolved,sort_keys=True))
     community=Path(__file__).resolve().parent
     verify_api_free(repos["converter"]/"tools",repos["sources"]/"tools",community/".github",Path(__file__).resolve(),allow_api_files=(community/".github/scripts/prune_workflow_runs.py",))
     execute([sys.executable,"tools/validate.py"],cwd=repos["sources"])
