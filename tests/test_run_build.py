@@ -195,6 +195,28 @@ unittest.main(argv=["checks"],verbosity=2)
                 diagnostics.write(line)
         self.assertEqual(output.getvalue(),'')
 
+    def test_build_uses_failure_isolation_without_running_converter_regressions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            (root/'runtime').mkdir()
+            with patch.object(runner,'job_root',return_value=root), \
+                    patch.object(runner,'run_with_error_logs',return_value=0) as run:
+                runner.build()
+            self.assertEqual(run.call_count,1)
+            self.assertIn('--verify',run.call_args.args[0])
+            self.assertIn('--isolate-script-failures',run.call_args.args[0])
+
+    def test_site_and_converter_checks_keep_independent_exit_statuses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            with patch.object(runner,'job_root',return_value=root), \
+                    patch.object(runner,'run_with_error_logs',side_effect=[0,1]) as run:
+                runner.check_tests('site')
+                with self.assertRaisesRegex(RuntimeError,'Conversion regression'):
+                    runner.check_tests('conversion')
+            self.assertEqual(run.call_args_list[0].args[0][-1],'site')
+            self.assertEqual(run.call_args_list[1].args[0][-1],'conversion')
+
 
 if __name__=='__main__':
     unittest.main()

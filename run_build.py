@@ -325,11 +325,17 @@ def build():
     if not runtime.is_dir():raise ValueError("Build input is missing")
     env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",PYTHONUNBUFFERED="1",EGERN_PROGRESS_EVENTS="1",EGERN_RAW_ROOT=str(raw))
     private=private_markers(os.environ.get("BUILD_REPOSITORY"))+private_markers(os.environ.get("UPSTREAM_REPOSITORY"))
-    result=run_with_error_logs([sys.executable,"build.py","--verify","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,log_path=root/"build.log",private_markers=private)
+    result=run_with_error_logs([sys.executable,"build.py","--verify","--isolate-script-failures","--output",str(dist),"--base-url","https://egern.pages.dev"],cwd=runtime,env=env,log_path=root/"build.log",private_markers=private)
     if result:
         raise RuntimeError("Source synchronization, tests, conversion or differential validation failed; previous website remains intact")
-    tests=run_with_error_logs([sys.executable,"-m","unittest","discover","-s","tests","-v"],cwd=runtime,env=env,log_path=root/"tests.log",private_markers=private)
-    if tests:raise RuntimeError("Full converter and build regression suite failed; see diagnostics above")
+
+def check_tests(domain):
+    root=job_root();runtime=root/"runtime"
+    env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",PYTHONUNBUFFERED="1")
+    private=private_markers(os.environ.get("BUILD_REPOSITORY"))+private_markers(os.environ.get("UPSTREAM_REPOSITORY"))
+    result=run_with_error_logs([sys.executable,"-m","tools.egern_hub.ci",domain],
+        cwd=runtime,env=env,log_path=root/("tests-"+domain+".log"),private_markers=private)
+    if result:raise RuntimeError(domain.capitalize()+" regression checks failed; see diagnostics above")
 
 def persist_upstream():
     root=job_root();archive=root/"upstream";raw=root/"captured-upstream";runtime=root/"runtime"
@@ -385,9 +391,10 @@ def publish():
     push_repository(target,address,key,"production")
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument("stage",choices=["prepare","build","persist-upstream","publish"])
+    parser=argparse.ArgumentParser();parser.add_argument("stage",choices=["prepare","build","check-site","check-converter","persist-upstream","publish"])
     stage=parser.parse_args().stage
-    {"prepare":prepare,"build":build,"persist-upstream":persist_upstream,"publish":publish}[stage]()
+    {"prepare":prepare,"build":build,"check-site":lambda:check_tests("site"),
+     "check-converter":lambda:check_tests("conversion"),"persist-upstream":persist_upstream,"publish":publish}[stage]()
 if __name__=="__main__":
     try:main()
     except Exception as exc:

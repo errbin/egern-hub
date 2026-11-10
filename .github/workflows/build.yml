@@ -87,12 +87,18 @@ jobs:
             exit 1
           }
         working-directory: ${{ runner.temp }}/egernlab-job/runtime
-      - name: Run tests and build with differential verification
+      - name: Build site and isolate failed script dependencies
         env:
           BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
           UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
           SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
         run: python3 "$RUNNER_TEMP/community/run_build.py" build
+      - name: Check website and publication regressions
+        env:
+          BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
+          UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
+          SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
+        run: python3 "$RUNNER_TEMP/community/run_build.py" check-site
       - name: Store the upstream snapshot with Git
         env:
           UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
@@ -103,3 +109,11 @@ jobs:
           SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
           SITE_WRITE_KEY: ${{ secrets.SITE_WRITE_KEY }}
         run: python3 "$RUNNER_TEMP/community/run_build.py" publish
+      - name: Report converter regressions independently of site publication
+        if: ${{ !cancelled() && success() }}
+        continue-on-error: true
+        env:
+          BUILD_REPOSITORY: ${{ secrets.BUILD_REPOSITORY }}
+          UPSTREAM_REPOSITORY: ${{ secrets.UPSTREAM_REPOSITORY }}
+          SITE_REPOSITORY: ${{ secrets.SITE_REPOSITORY }}
+        run: python3 "$RUNNER_TEMP/community/run_build.py" check-converter
