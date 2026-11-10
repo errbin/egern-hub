@@ -78,12 +78,32 @@ class ErrorLogFilter:
     def __init__(self,sanitizer):
         self.sanitizer=sanitizer
         self.traceback=False
+        self.test_failure=None
+        self.test_summary=None
         self.emitted=False
         self.tail=deque(maxlen=20)
 
     def write(self,line):
         # Sanitize every line, including hidden key bodies, to preserve redaction state.
         line=self.sanitizer.clean(line)
+        if re.match(r"^(?:FAIL|ERROR):\s+\S",line):
+            self.test_failure="header"
+            self.emit(line)
+            return
+        if self.test_failure:
+            if re.fullmatch(r"={5,}",line):
+                self.test_failure=None
+            elif re.fullmatch(r"-{5,}",line):
+                self.test_failure="body" if self.test_failure=="header" else None
+            else:
+                self.emit(line)
+            return
+        if re.fullmatch(r"Ran \d+ tests? in .+",line):
+            self.test_summary=line
+            return
+        if line.startswith("FAILED (") and self.test_summary:
+            self.emit(self.test_summary)
+            self.test_summary=None
         if line.startswith("@@EGERN_PROGRESS "):
             self.traceback=False
             try:event=json.loads(line[len("@@EGERN_PROGRESS "):])

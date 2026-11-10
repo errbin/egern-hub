@@ -163,6 +163,38 @@ sys.exit(7 if signal.exists() else 8)
         self.assertIn('malformed response',output.getvalue())
         self.assertNotIn('private-engine',output.getvalue())
 
+    def test_preserves_complete_multiline_unittest_failures_and_failed_totals(self):
+        output=io.StringIO()
+        child='''import unittest
+print("ordinary progress",flush=True)
+class Checks(unittest.TestCase):
+    def test_difference(self):
+        self.assertEqual({"unexpected-entry"},set())
+    def test_multiline(self):
+        self.fail("first line\\nsecond line without indentation\\nprivate-inputs: expected snapshot differs")
+unittest.main(argv=["checks"],verbosity=2)
+'''
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(output):
+            root=Path(temporary)
+            result=runner.run_with_error_logs([sys.executable,'-u','-c',child],
+                cwd=root,env=self.environment(),log_path=root/'tests.log')
+        self.assertEqual(result,1)
+        text=output.getvalue()
+        for visible in ["'unexpected-entry'",'second line without indentation',
+                        'expected snapshot differs','Ran 2 tests in ',
+                        'FAILED (failures=2)']:
+            self.assertIn(visible,text)
+        for hidden in ['private-engine','private-inputs','ordinary progress']:
+            self.assertNotIn(hidden,text)
+
+    def test_successful_unittest_totals_remain_silent(self):
+        output=io.StringIO()
+        diagnostics=runner.ErrorLogFilter(runner.LogSanitizer(self.environment()))
+        with contextlib.redirect_stdout(output):
+            for line in ['Ran 10 tests in 0.1s', '', 'OK', 'ordinary progress']:
+                diagnostics.write(line)
+        self.assertEqual(output.getvalue(),'')
+
 
 if __name__=='__main__':
     unittest.main()
