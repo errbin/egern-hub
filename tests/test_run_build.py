@@ -5,9 +5,11 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -216,6 +218,65 @@ unittest.main(argv=["checks"],verbosity=2)
                     runner.check_tests('conversion')
             self.assertEqual(run.call_args_list[0].args[0][-1],'site')
             self.assertEqual(run.call_args_list[1].args[0][-1],'conversion')
+
+
+class SitePublicationTests(unittest.TestCase):
+    def git(self,root,*args):
+        return subprocess.check_output(['git','-C',str(root),*args],stderr=subprocess.PIPE,text=True).strip()
+
+    def test_repeated_publication_updates_only_main_and_preserves_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            remote=root/'output.git'
+            remote.mkdir()
+            self.git(remote,'init','--quiet','--bare','--initial-branch=main')
+            seed=root/'seed'
+            seed.mkdir()
+            self.git(seed,'init','--quiet','--initial-branch=main')
+            self.git(seed,'config','user.name','errbin')
+            self.git(seed,'config','user.email','errbin@users.noreply.github.com')
+            (seed/'README.md').write_text('Website output repository.\n')
+            self.git(seed,'add','README.md')
+            self.git(seed,'commit','--quiet','-m','Initialize output repository')
+            initial=self.git(seed,'rev-parse','HEAD')
+            self.git(seed,'push','--quiet',remote.as_uri(),'HEAD:refs/heads/main')
+            job=root/'job'
+            dist=job/'site-output'
+            (dist/'assets').mkdir(parents=True)
+            (dist/'index.html').write_text('<!doctype html><title>Published site</title>')
+            (dist/'assets/app.js').write_text('console.log("site");\n')
+            cleaner=types.ModuleType('publish')
+            cleaner.prepare=lambda source,target,forbidden:shutil.copytree(source,target)
+            # The private sanitizer has its own tests; exercise the public runner
+            # here against a real local Git remote without private inputs or SSH.
+            with patch.object(runner,'job_root',return_value=job), \
+                    patch.dict(sys.modules,{'publish':cleaner}), \
+                    patch.dict(os.environ,{'SITE_REPOSITORY':remote.as_uri(),
+                                          'SITE_WRITE_KEY':'local-test-key'}):
+                path_before=list(sys.path)
+                try:
+                    runner.publish()
+                    first=self.git(remote,'rev-parse','main')
+                    self.assertEqual(self.git(remote,'show','main:index.html'),(dist/'index.html').read_text())
+                    self.assertEqual(self.git(remote,'show','main:assets/app.js'),(dist/'assets/app.js').read_text().strip())
+                    self.assertEqual(self.git(remote,'show','-s','--format=%s','main'),'Publish verified website')
+                    self.assertEqual(self.git(remote,'show','-s','--format=%an <%ae>','main'),'errbin <errbin@users.noreply.github.com>')
+                    self.assertEqual(self.git(remote,'ls-tree','--name-only','main'),'assets\nindex.html')
+                    self.assertEqual(self.git(remote,'rev-parse','main^'),initial)
+                    (dist/'assets/app.js').unlink()
+                    (dist/'index.html').write_text('<!doctype html><title>Updated site</title>')
+                    shutil.rmtree(job/'sanitized-site')
+                    runner.publish()
+                    second=self.git(remote,'rev-parse','main')
+                    self.assertNotEqual(second,first)
+                    self.assertEqual(self.git(remote,'rev-parse','main^'),first)
+                    self.assertEqual(self.git(remote,'ls-tree','--name-only','main'),'index.html')
+                    shutil.rmtree(job/'sanitized-site')
+                    runner.publish()
+                    self.assertEqual(self.git(remote,'rev-parse','main'),second)
+                    self.assertEqual(self.git(remote,'for-each-ref','--format=%(refname)','refs/heads'),'refs/heads/main')
+                finally:
+                    sys.path[:]=path_before
 
 
 if __name__=='__main__':

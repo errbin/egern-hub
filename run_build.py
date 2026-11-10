@@ -352,9 +352,9 @@ def persist_upstream():
     for name in ["icons","avatars","previews"]:
         src=runtime/"web/assets"/name
         if src.exists():shutil.copytree(src,archive/"state/artwork"/name,dirs_exist_ok=True)
-    push_repository(archive,os.environ.get("UPSTREAM_REPOSITORY"),os.environ.get("UPSTREAM_WRITE_KEY"),"main")
+    push_repository(archive,os.environ.get("UPSTREAM_REPOSITORY"),os.environ.get("UPSTREAM_WRITE_KEY"),"main",message="Update upstream snapshot")
 
-def push_repository(directory, destination, key, branch):
+def push_repository(directory, destination, key, branch, *, message):
     if not destination or not key:raise ValueError("Missing publication configuration")
     root=Path(directory)
     if not (root/".git").is_dir():raise ValueError("Publication checkout is missing")
@@ -363,7 +363,7 @@ def push_repository(directory, destination, key, branch):
     execute(["git","-C",str(root),"add","--all"])
     status=execute(["git","-C",str(root),"status","--porcelain"])
     if status:
-        execute(["git","-C",str(root),"commit","--quiet","-m", "Update upstream snapshot" if branch=="main" else "Publish verified website"])
+        execute(["git","-C",str(root),"commit","--quiet","-m",message])
     execute(["git","-C",str(root),"push","--quiet","origin",f"HEAD:refs/heads/{branch}"],key=key)
 
 def publish():
@@ -379,16 +379,11 @@ def publish():
     sanitized=root/"sanitized-site"
     clean_site(dist,sanitized,forbidden)
     clone(address,target,key)
-    result=execute(["git","-C",str(target),"ls-remote","origin","refs/heads/production"],key=key)
-    if result:
-        execute(["git","-C",str(target),"fetch","--quiet","origin","production"],key=key)
-        execute(["git","-C",str(target),"checkout","--quiet","-B","production","FETCH_HEAD"])
-    else:execute(["git","-C",str(target),"checkout","--quiet","-b","production","main"])
     for p in list(target.iterdir()):
         if p.name==".git":continue
         shutil.rmtree(p) if p.is_dir() else p.unlink()
     shutil.copytree(sanitized,target,dirs_exist_ok=True)
-    push_repository(target,address,key,"production")
+    push_repository(target,address,key,"main",message="Publish verified website")
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument("stage",choices=["prepare","build","check-site","check-converter","persist-upstream","publish"])
