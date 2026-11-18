@@ -2,11 +2,13 @@
 from __future__ import annotations
 import argparse
 from collections import deque
+import filecmp
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -339,21 +341,131 @@ def check_tests(domain):
         cwd=runtime,env=env,log_path=root/("tests-"+domain+".log"),private_markers=private)
     if result:raise RuntimeError(domain.capitalize()+" regression checks failed; see diagnostics above")
 
+SYNC_STATS=("copied_files","copied_bytes","metadata_files","deleted_files","deleted_dirs")
+
+def _sync_stats(stats):
+    stats={} if stats is None else stats
+    for key in SYNC_STATS:stats.setdefault(key,0)
+    return stats
+
+def _remove_path(path):
+    mode=path.lstat().st_mode
+    if stat.S_ISDIR(mode):shutil.rmtree(path)
+    else:path.unlink()
+
+def _ensure_directory(root,relative,ensured):
+    if relative in ensured:return
+    current=root
+    for part in relative.parts:
+        current=current/part
+        try:mode=current.lstat().st_mode
+        except FileNotFoundError:
+            current.mkdir()
+            continue
+        if stat.S_ISDIR(mode):continue
+        # 目标侧若被链接或文件占用，先移除该节点，避免后续写入穿透到目标树之外。
+        _remove_path(current)
+        current.mkdir()
+    ensured.add(relative)
+
+def _source_files(source):
+    files={};pending=[(source,Path())]
+    while pending:
+        directory,relative=pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                item=relative/entry.name;source_stat=entry.stat(follow_symlinks=False);mode=source_stat.st_mode
+                if item.parts and item.parts[0]=='.git':
+                    raise ValueError("Upstream snapshots cannot contain Git metadata")
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"Upstream snapshots cannot contain symlinks: {item.as_posix()}")
+                if stat.S_ISDIR(mode):pending.append((Path(entry.path),item))
+                elif stat.S_ISREG(mode):files[item]=source_stat
+                else:raise ValueError(f"Upstream snapshots contain a non-regular file: {item.as_posix()}")
+    return files
+
+def _target_files(target):
+    files={};directories=[];pending=[(target,Path())]
+    while pending:
+        directory,relative=pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                item=relative/entry.name;mode=entry.stat(follow_symlinks=False).st_mode
+                if item.parts and item.parts[0]=='.git':continue
+                if stat.S_ISDIR(mode):
+                    directories.append(item)
+                    pending.append((Path(entry.path),item))
+                else:files[item]=Path(entry.path)
+    return files,directories
+
+def sync_tree(source,target,*,stats=None,delete_missing=True,sync_metadata=True):
+    """Copy changed files from a source tree and remove exact target extras."""
+    source,target=Path(source),Path(target);stats=_sync_stats(stats)
+    source_mode=source.lstat().st_mode
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
+        raise ValueError("Upstream snapshot source must be a real directory")
+    try:target_mode=target.lstat().st_mode
+    except FileNotFoundError:
+        target.mkdir(parents=True)
+    else:
+        if stat.S_ISLNK(target_mode) or not stat.S_ISDIR(target_mode):
+            raise ValueError("Upstream snapshot target must be a real directory")
+    expected=_source_files(source)
+    existing,directories=_target_files(target)
+    ensured=set()
+    if delete_missing:
+        for relative,path in existing.items():
+            if relative not in expected:
+                path.unlink()
+                stats["deleted_files"]+=1
+    for relative,source_stat in expected.items():
+        destination=target/relative;source_path=source/relative
+        _ensure_directory(target,relative.parent,ensured)
+        try:target_stat=destination.lstat()
+        except FileNotFoundError:target_stat=None
+        if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
+            _remove_path(destination)
+            target_stat=None
+        copy=False
+        if target_stat is None:
+            copy=True
+        elif target_stat.st_size!=source_stat.st_size:
+            copy=True
+        elif target_stat.st_mtime_ns!=source_stat.st_mtime_ns or stat.S_IMODE(target_stat.st_mode)!=stat.S_IMODE(source_stat.st_mode):
+            if not filecmp.cmp(source_path,destination,shallow=False):
+                copy=True
+            elif sync_metadata:
+                # 内容一致时只修复权限/时间，避免无意义重写和后续重复比较。
+                shutil.copystat(source_path,destination,follow_symlinks=False)
+                stats["metadata_files"]+=1
+        if copy:
+            shutil.copy2(source_path,destination,follow_symlinks=False)
+            stats["copied_files"]+=1
+            stats["copied_bytes"]+=source_stat.st_size
+    if delete_missing:
+        for relative in sorted(directories,key=lambda item:len(item.parts),reverse=True):
+            try:(target/relative).rmdir()
+            except OSError:continue
+            stats["deleted_dirs"]+=1
+    return stats
+
 def persist_upstream():
     root=job_root();archive=root/"upstream";raw=root/"captured-upstream";runtime=root/"runtime"
     if not archive.is_dir():raise ValueError("Upstream archive checkout is missing")
+    stats={}
+    # 本轮新捕获的 raw/manifests 是增补来源；删除由随后的完整 sources 快照统一负责。
     for name in ["raw","manifests"]:
         src=raw/name
-        if src.exists():shutil.copytree(src,archive/name,dirs_exist_ok=True)
+        if src.exists():sync_tree(src,archive/name,stats=stats,delete_missing=False,sync_metadata=False)
     sys.path.insert(0,str(runtime))
     from tools.egern_hub.raw_archive import archive_snapshot
-    archive_snapshot(runtime/"sources",archive)
+    archive_snapshot(runtime/"sources",archive,stats=stats)
     for name in ["cache","data"]:
         src=runtime/name
-        if src.exists():shutil.copytree(src,archive/"state"/name,dirs_exist_ok=True)
+        if src.exists():sync_tree(src,archive/"state"/name,stats=stats)
     for name in ["icons","avatars","previews"]:
         src=runtime/"web/assets"/name
-        if src.exists():shutil.copytree(src,archive/"state/artwork"/name,dirs_exist_ok=True)
+        if src.exists():sync_tree(src,archive/"state/artwork"/name,stats=stats)
     push_repository(archive,os.environ.get("UPSTREAM_REPOSITORY"),os.environ.get("UPSTREAM_WRITE_KEY"),"main",message="Update upstream snapshot")
 
 def check_published_file_sizes(directory,max_bytes=None):
