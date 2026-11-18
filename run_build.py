@@ -16,6 +16,8 @@ PUBLIC = {
     "converter": "https://github.com/errbin/egern-converter.git",
     "sources": "https://github.com/errbin/egern-sources.git",
 }
+# GitHub 单文件上限为 100 MB，发布前保留一半安全余量。
+PUBLISHED_FILE_MAX_BYTES=50*1024*1024
 
 def execute(args, *, key=None, cwd=None, data=None):
     env = dict(os.environ)
@@ -354,6 +356,18 @@ def persist_upstream():
         if src.exists():shutil.copytree(src,archive/"state/artwork"/name,dirs_exist_ok=True)
     push_repository(archive,os.environ.get("UPSTREAM_REPOSITORY"),os.environ.get("UPSTREAM_WRITE_KEY"),"main",message="Update upstream snapshot")
 
+def check_published_file_sizes(directory,max_bytes=None):
+    root=Path(directory)
+    limit=PUBLISHED_FILE_MAX_BYTES if max_bytes is None else max_bytes
+    oversized=[]
+    for relative in execute(["git","-C",str(root),"ls-files","-z"]).split("\0"):
+        if not relative:continue
+        size=(root/relative).lstat().st_size
+        if size>limit:oversized.append((relative,size))
+    if oversized:
+        details=", ".join(f"{relative} ({size:,} bytes)" for relative,size in oversized)
+        raise ValueError(f"Publication contains files over {limit:,} bytes: {details}")
+
 def push_repository(directory, destination, key, branch, *, message):
     if not destination or not key:raise ValueError("Missing publication configuration")
     root=Path(directory)
@@ -361,6 +375,8 @@ def push_repository(directory, destination, key, branch, *, message):
     execute(["git","-C",str(root),"config","user.name","errbin"])
     execute(["git","-C",str(root),"config","user.email","errbin@users.noreply.github.com"])
     execute(["git","-C",str(root),"add","--all"])
+    # 远端会在 push 时才拒绝超限文件，因此必须在此处提前失败并列出路径与大小。
+    check_published_file_sizes(root)
     status=execute(["git","-C",str(root),"status","--porcelain"])
     if status:
         execute(["git","-C",str(root),"commit","--quiet","-m",message])
