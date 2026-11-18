@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import filecmp
+import importlib
 import json
 import os
 from pathlib import Path
@@ -458,8 +459,11 @@ def persist_upstream():
         src=raw/name
         if src.exists():sync_tree(src,archive/name,stats=stats,delete_missing=False,sync_metadata=False)
     sys.path.insert(0,str(runtime))
-    from tools.egern_hub.raw_archive import archive_snapshot
-    archive_snapshot(runtime/"sources",archive,stats=stats)
+    raw_archive=importlib.import_module("tools.egern_hub.raw_archive")
+    raw_archive.archive_snapshot(runtime/"sources",archive,stats=stats)
+    # 兼容旧 core：新接口缺失时仍可完成本轮构建，只是不启用索引合并。
+    compact=getattr(raw_archive,"compact_archive",None)
+    if compact is not None:compact(archive,stats=stats)
     for name in ["cache","data"]:
         src=runtime/name
         if src.exists():sync_tree(src,archive/"state"/name,stats=stats)
